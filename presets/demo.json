@@ -1,0 +1,13 @@
+{
+  "description": "Landscape 16:9 for YouTube and Facebook. Upload to s3://<bucket>/uploads/demo/",
+  "resolution": [1920, 1080],
+  "fps": 30,
+  "fit": "pad",
+  "intro": { "subtitle": "Product demo", "accent": "#2f80ed" },
+  "outro": { "title": "Thanks for watching", "subtitle": "Subscribe for more" },
+  "music": { "trackId": "d61af73d-6597-4fd2-b95e-179549b30401", "volume": 0.2 },
+  "loudness": -14,
+  "caption": "{title}",
+  "platforms": ["youtube", "facebook"],
+  "youtube": { "privacy": "public", "categoryId": "28", "tags": ["demo"] }
+}

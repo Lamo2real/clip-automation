@@ -1,0 +1,18 @@
+{
+  "output": "out/example.mp4",
+  "resolution": [1920, 1080],
+  "fps": 30,
+  "clips": [
+    { "type": "title", "variables": { "title": "Product Demo", "subtitle": "Recorded with Tella", "accent": "#ff5a36" } },
+    { "type": "video", "src": "media/raw/demo.mp4", "in": 0, "out": 8 },
+    { "type": "title", "variables": { "title": "Thanks for watching", "subtitle": "Subscribe for more" } }
+  ],
+  "music": {
+    "src": "media/music/demo.mp3",
+    "volume": 0.3,
+    "duck": true,
+    "fadeIn": 1,
+    "fadeOut": 2
+  },
+  "loudness": -14
+}

@@ -1,0 +1,14 @@
+{
+  "description": "Vertical 9:16 for Reels, TikTok and Shorts. Upload to s3://<bucket>/uploads/social/",
+  "resolution": [1080, 1920],
+  "fps": 30,
+  "fit": "blur",
+  "intro": { "subtitle": "", "accent": "#ff5a36" },
+  "outro": { "title": "Follow for more", "subtitle": "" },
+  "music": { "trackId": "bc654f2f-4b61-4278-8f98-2cfb5c3aad7b", "volume": 0.25 },
+  "loudness": -14,
+  "caption": "{title}\n\n#shorts #reels",
+  "platforms": ["instagram", "facebook", "youtube", "tiktok"],
+  "youtube": { "privacy": "public", "categoryId": "22", "tags": [] },
+  "tiktok": { "privacy": "SELF_ONLY" }
+}

@@ -1,0 +1,194 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Video Studio event pipeline. Uploads to s3://<bucket>/uploads/<preset>/ raise an event on the
+  jobs queue; the worker on your Mac edits the video and sends it to WhatsApp for review; the
+  WhatsApp webhook puts your Approve/Reject answer back on the same queue.
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Globally unique S3 bucket name for uploads and finished videos.
+  WhatsAppVerifyToken:
+    Type: String
+    NoEcho: true
+    Description: Any random string. You paste the same value into the Meta webhook settings.
+  WhatsAppAppSecret:
+    Type: String
+    NoEcho: true
+    Description: Meta app secret, used to check that webhook calls really come from Meta.
+  OwnerWhatsAppNumber:
+    Type: String
+    Description: Your WhatsApp number in international format without + (e.g. 46701234567). Only this number can approve.
+
+Resources:
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+
+  JobsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      # A render can take a while; the message stays hidden from other receivers until it's done.
+      VisibilityTimeout: 3600
+      MessageRetentionPeriod: 1209600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  JobsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref JobsQueue]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: s3.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt JobsQueue.Arn
+            Condition:
+              ArnLike: { aws:SourceArn: !Sub "arn:aws:s3:::${BucketName}" }
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: JobsQueuePolicy
+    Properties:
+      BucketName: !Ref BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-previews
+            Prefix: previews/
+            Status: Enabled
+            ExpirationInDays: 30
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt JobsQueue.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - { Name: prefix, Value: uploads/ }
+
+  WebhookRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: send-to-jobs-queue
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt JobsQueue.Arn
+
+  WebhookFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt WebhookRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref JobsQueue
+          VERIFY_TOKEN: !Ref WhatsAppVerifyToken
+          APP_SECRET: !Ref WhatsAppAppSecret
+          OWNER_NUMBER: !Ref OwnerWhatsAppNumber
+      Code:
+        ZipFile: |
+          const crypto = require("node:crypto");
+          const { SQSClient, SendMessageCommand } = require("@aws-sdk/client-sqs");
+          const sqs = new SQSClient({});
+
+          const html = (body) => ({ statusCode: 200, headers: { "content-type": "text/html; charset=utf-8" }, body });
+          const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+          exports.handler = async (event) => {
+            const method = event.requestContext.http.method;
+            const q = event.queryStringParameters || {};
+
+            // OAuth redirect target for `node studio.mjs auth tiktok`: just shows the code to copy.
+            if (method === "GET" && event.rawPath === "/oauth/callback") {
+              if (!q.code) return html("<p>No code in this link.</p>");
+              return html(`<h2>Copy this code into your terminal</h2><pre style="font-size:18px;word-break:break-all">${esc(q.code)}</pre>`);
+            }
+
+            // Meta webhook verification handshake.
+            if (method === "GET") {
+              if (q["hub.mode"] === "subscribe" && q["hub.verify_token"] === process.env.VERIFY_TOKEN) {
+                return { statusCode: 200, body: q["hub.challenge"] };
+              }
+              return { statusCode: 403, body: "forbidden" };
+            }
+
+            const raw = event.isBase64Encoded ? Buffer.from(event.body || "", "base64") : Buffer.from(event.body || "");
+            const expected = "sha256=" + crypto.createHmac("sha256", process.env.APP_SECRET).update(raw).digest("hex");
+            const given = event.headers["x-hub-signature-256"] || "";
+            if (given.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected))) {
+              return { statusCode: 401, body: "bad signature" };
+            }
+
+            const payload = JSON.parse(raw.toString("utf8"));
+            for (const entry of payload.entry || []) {
+              for (const change of entry.changes || []) {
+                for (const msg of change.value?.messages || []) {
+                  if (msg.from !== process.env.OWNER_NUMBER) continue;
+                  const answer = msg.button?.payload || msg.interactive?.button_reply?.id || "";
+                  const m = answer.match(/^(approve|reject):([a-z0-9-]+)$/);
+                  if (!m) continue;
+                  await sqs.send(new SendMessageCommand({
+                    QueueUrl: process.env.QUEUE_URL,
+                    MessageBody: JSON.stringify({ type: "review", decision: m[1], jobId: m[2], messageId: msg.id }),
+                  }));
+                }
+              }
+            }
+            return { statusCode: 200, body: "ok" };
+          };
+
+  WebhookUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt WebhookFunction.Arn
+      AuthType: NONE
+
+  WebhookUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebhookFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  WebhookInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebhookFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  BucketName:
+    Value: !Ref MediaBucket
+  JobsQueueUrl:
+    Value: !Ref JobsQueue
+  WebhookUrl:
+    Description: Paste this into Meta > WhatsApp > Configuration > Webhook callback URL.
+    Value: !GetAtt WebhookUrl.FunctionUrl
+  OAuthRedirectUrl:
+    Description: Register this as the redirect URI in your TikTok developer app.
+    Value: !Sub "${WebhookUrl.FunctionUrl}oauth/callback"

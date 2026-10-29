@@ -1,0 +1,11 @@
+.env
+node_modules/
+out/
+media/raw/*
+media/music/*
+titles/.hyperframes/
+titles/renders/
+titles-portrait/.hyperframes/
+titles-portrait/renders/
+!media/raw/.gitkeep
+!media/music/.gitkeep
